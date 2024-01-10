@@ -46,7 +46,7 @@ fn main() -> Result<(), rustbus::connection::Error> {
     // Stop 42
     // Track Back 58
     // Track Forward 59
-    //spawn a non-real-time thread that prints out the midi messages we get
+    //spawn a non-real-time thread that sends the dbus messages to Spotify
     std::thread::spawn(move || {
         while let Ok(m) = receiver.recv() {
             if m.data[2] == 127 {

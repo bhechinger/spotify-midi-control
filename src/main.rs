@@ -57,7 +57,13 @@ fn main() -> Result<(), rustbus::connection::Error> {
                     59 => spot.handle_midi(m, "Next").unwrap(),
                     _ => spot.handle_midi(m, "pass-through").unwrap()
                 }
+            } else {
+                match m.data[1] {
+                    41 | 42 | 58 | 59 => (), // Ignore these, we only want the NoteOn message
+                    _ => spot.handle_midi(m, "pass-through").unwrap()
+                }
             }
+
         }
     });
 

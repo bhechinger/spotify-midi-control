@@ -18,9 +18,9 @@ fn main() -> Result<(), rustbus::connection::Error> {
     let sender2 = sender.clone();
 
     // process logic
-    let mut _maker = client
-        .register_port("MIDI Through", jack::MidiOut)
-        .unwrap();
+    // let mut _maker = client
+    //     .register_port("MIDI Through", jack::MidiOut)
+    //     .unwrap();
     let shower = client
         .register_port("MIDI In", jack::MidiIn)
         .unwrap();
@@ -49,19 +49,21 @@ fn main() -> Result<(), rustbus::connection::Error> {
     //spawn a non-real-time thread that sends the dbus messages to Spotify
     std::thread::spawn(move || {
         while let Ok(m) = receiver.recv() {
-            if m.data[2] == 127 {
+            println!("midi data: {:?}", m);
+            if m.data[2] == 127 && m.status == 0b1011 && m.channel == 0b0 {
                 match m.data[1] {
                     41 => spot.handle_midi(m, "Play").unwrap(),
                     42 => spot.handle_midi(m, "Pause").unwrap(),
                     58 => spot.handle_midi(m, "Previous").unwrap(),
                     59 => spot.handle_midi(m, "Next").unwrap(),
-                    _ => spot.handle_midi(m, "pass-through").unwrap()
+                    // _ => spot.handle_midi(m, "pass-through").unwrap()
+                    _ => {}
                 }
-            } else {
-                match m.data[1] {
-                    41 | 42 | 58 | 59 => (), // Ignore these, we only want the NoteOn message
-                    _ => spot.handle_midi(m, "pass-through").unwrap()
-                }
+            // } else {
+            //     match m.data[1] {
+            //         41 | 42 | 58 | 59 => (), // Ignore these, we only want the NoteOn message
+            //         _ => spot.handle_midi(m, "pass-through").unwrap()
+            //     }
             }
 
         }

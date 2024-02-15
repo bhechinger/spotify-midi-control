@@ -1,13 +1,9 @@
-{ pkgs ? import <nixpkgs> { } }:
-pkgs.mkShell {
+{mkShell, callPackage, libjack2}:
+mkShell {
   # Get dependencies from the main package
-  inputsFrom = [ (pkgs.callPackage ./default.nix { }) ];
+  inputsFrom = [ (callPackage ./default.nix { }) ];
   # Additional tooling
-  buildInputs = with pkgs; [
-    rust-analyzer # LSP Server
-    rustfmt       # Formatter
-    clippy        # Linter
-	pkg-config
-	libjack2
+  buildInputs = [
+    libjack2
   ];
 }

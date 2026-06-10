@@ -6,22 +6,28 @@ pub struct MidiCopy {
     pub data: [u8; MAX_MIDI],
     pub status: u8,
     pub channel: u8,
-    pub time: jack::Frames,
+    pub time: u32,
 }
 
-impl From<jack::RawMidi<'_>> for MidiCopy {
-    fn from(midi: jack::RawMidi<'_>) -> Self {
-        let len = std::cmp::min(MAX_MIDI, midi.bytes.len());
+impl MidiCopy {
+    pub fn from_bytes(bytes: &[u8], time: u32) -> Self {
+        let len = std::cmp::min(MAX_MIDI, bytes.len());
         let mut data = [0; MAX_MIDI];
-        data[..len].copy_from_slice(&midi.bytes[..len]);
+        data[..len].copy_from_slice(&bytes[..len]);
         let status = unpack(data[0]);
         MidiCopy {
             len,
             data,
             status: status[0],
             channel: status[1],
-            time: midi.time,
+            time,
         }
+    }
+}
+
+impl From<jack::RawMidi<'_>> for MidiCopy {
+    fn from(midi: jack::RawMidi<'_>) -> Self {
+        MidiCopy::from_bytes(midi.bytes, midi.time)
     }
 }
 

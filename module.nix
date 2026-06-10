@@ -1,55 +1,122 @@
-{ lib, pkgs, config, ... }:
+{
+  lib,
+  pkgs,
+  config,
+  spotify-midi-control-package ? pkgs.spotify-midi-control,
+  ...
+}:
 with lib;
 let
-  # Shorter name to access final settings a
-  # user of hello.nix module HAS ACTUALLY SET.
-  # cfg is a typical convention.
   cfg = config.services.spotify-midi-control;
-in {
-  # Declare what settings a user of this "hello.nix" module CAN SET.
+  midiCommand = command: concatMapStringsSep "," toString command;
+in
+{
   options.services.spotify-midi-control = {
     enable = mkEnableOption "Spotify MIDI Control";
-    midi_config = {
-      thing1 = mkOption {
-        type = types.integer;
-        default = 128;
+
+    backend = mkOption {
+      type = types.enum [
+        "jack"
+        "pipewire"
+      ];
+      default = "jack";
+      description = "MIDI backend to use.";
+    };
+
+    clientName = mkOption {
+      type = types.str;
+      default = "spotify control";
+      description = "Client name advertised by the selected MIDI backend.";
+    };
+
+    package = mkOption {
+      type = types.package;
+      default = spotify-midi-control-package;
+      defaultText = literalExpression "pkgs.spotify-midi-control";
+      description = "Package providing the spotify-midi-control executable.";
+    };
+
+    pipewireRemote = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "Optional PipeWire remote daemon name.";
+    };
+
+    pipewireTarget = mkOption {
+      type = types.nullOr types.int;
+      default = null;
+      description = "Optional PipeWire target node id.";
+    };
+
+    learn = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Print incoming MIDI command bytes instead of controlling Spotify.";
+    };
+    midiCommands = {
+      play = mkOption {
+        type = types.listOf types.int;
+        default = [
+          176
+          41
+          127
+        ];
+        description = "MIDI bytes that trigger Play.";
       };
-      status = mkOption {
-        type = types.integer;
-        default = 0b1011;
+
+      pause = mkOption {
+        type = types.listOf types.int;
+        default = [
+          176
+          42
+          127
+        ];
+        description = "MIDI bytes that trigger Pause.";
       };
-      channel = mkOption {
-        type = types.integer;
-        default = 0b0;
+
+      previous = mkOption {
+        type = types.listOf types.int;
+        default = [
+          176
+          58
+          127
+        ];
+        description = "MIDI bytes that trigger Previous.";
       };
-      controls = {
-        play = mkOption {
-          type = types.integer;
-          default = 41;
-        };
-        pause = mkOption {
-          type = types.integer;
-          default = 42;
-        };
-        previous = mkOption {
-          type = types.integer;
-          default = 58;
-        };
-        next = mkOption {
-          type = types.integer;
-          default = 59;
-        };
+
+      next = mkOption {
+        type = types.listOf types.int;
+        default = [
+          176
+          59
+          127
+        ];
+        description = "MIDI bytes that trigger Next.";
       };
     };
   };
 
-  # Define what other settings, services and resources should be active IF
-  # a user of this "hello.nix" module ENABLED this module
-  # by setting "services.hello.enable = true;".
   config = mkIf cfg.enable {
-    systemd.services.spotify-midi-control = {
-      wantedBy = [ "multi-user.target" ];
-      serviceConfig.ExecStart = "${pkgs.spotify-midi-control}/bin/spotify-midi-config";
+    systemd.user.services.spotify-midi-control = {
+      wants = optional (cfg.backend == "pipewire") "pipewire.service";
+      after = optional (cfg.backend == "pipewire") "pipewire.service";
+      wantedBy = [ "default.target" ];
+      serviceConfig.ExecStart = concatStringsSep " " (
+        [
+          "${cfg.package}/bin/spotify-midi-control"
+          "--backend ${escapeShellArg cfg.backend}"
+          "--client-name ${escapeShellArg cfg.clientName}"
+          "--play-command ${escapeShellArg (midiCommand cfg.midiCommands.play)}"
+          "--pause-command ${escapeShellArg (midiCommand cfg.midiCommands.pause)}"
+          "--previous-command ${escapeShellArg (midiCommand cfg.midiCommands.previous)}"
+          "--next-command ${escapeShellArg (midiCommand cfg.midiCommands.next)}"
+        ]
+        ++ optional cfg.learn "--learn"
+        ++ optionals (cfg.backend == "pipewire") (
+          optional (cfg.pipewireRemote != null) "--pipewire-remote ${escapeShellArg cfg.pipewireRemote}"
+          ++ optional (cfg.pipewireTarget != null) "--pipewire-target ${toString cfg.pipewireTarget}"
+        )
+      );
     };
   };
 }

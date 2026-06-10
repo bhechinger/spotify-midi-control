@@ -7,4 +7,6 @@ edition = "2021"
 
 [dependencies]
 jack = "0.11.4"
+libspa = "0.10.0"
+pipewire = "0.10.0"
 rustbus = "0.19.3"

@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::mem;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::thread;
@@ -263,9 +263,16 @@ fn run_jack(client_name: &str, sender: SyncSender<midi::MidiCopy>) -> Result<(),
 }
 
 fn wait_for_quit() {
-    println!("Press enter to quit");
-    let mut user_input = String::new();
-    io::stdin().read_line(&mut user_input).ok();
+    if io::stdin().is_terminal() {
+        println!("Press enter to quit");
+        let mut user_input = String::new();
+        io::stdin().read_line(&mut user_input).ok();
+    } else {
+        println!("Running until service stop");
+        loop {
+            thread::park();
+        }
+    }
 }
 
 fn run_pipewire(config: &Config, sender: SyncSender<midi::MidiCopy>) -> Result<(), Box<dyn Error>> {
@@ -334,18 +341,31 @@ fn run_pipewire(config: &Config, sender: SyncSender<midi::MidiCopy>) -> Result<(
         &mut params,
     )?;
 
-    println!("Press enter to quit");
-    let (quit_sender, quit_receiver) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        let mut user_input = String::new();
-        io::stdin().read_line(&mut user_input).ok();
-        let _ = quit_sender.send(());
-    });
+    let quit_receiver = if io::stdin().is_terminal() {
+        println!("Press enter to quit");
+        let (quit_sender, quit_receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let mut user_input = String::new();
+            io::stdin().read_line(&mut user_input).ok();
+            let _ = quit_sender.send(());
+        });
+        Some(quit_receiver)
+    } else {
+        println!("Running until service stop");
+        None
+    };
 
-    while quit_receiver.try_recv().is_err() {
+    loop {
         mainloop.loop_().iterate(pw::loop_::Timeout::Finite(
             std::time::Duration::from_millis(100),
         ));
+
+        if quit_receiver
+            .as_ref()
+            .is_some_and(|receiver| receiver.try_recv().is_ok())
+        {
+            break;
+        }
     }
 
     Ok(())

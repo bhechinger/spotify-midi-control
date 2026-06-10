@@ -1,7 +1,15 @@
-{ lib, rustPlatform, pkg-config, libjack2, pipewire, llvmPackages, stdenv }:
-rustPlatform.buildRustPackage rec {
+{
+  lib,
+  rustPlatform,
+  pkg-config,
+  libjack2,
+  pipewire,
+  llvmPackages,
+  stdenv,
+}:
+rustPlatform.buildRustPackage {
   pname = "spotify-midi-control";
-  version = "0.1";
+  version = "0.1.0";
   cargoLock.lockFile = ./Cargo.lock;
   src = lib.cleanSource ./.;
 

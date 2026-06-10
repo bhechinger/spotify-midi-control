@@ -1,4 +1,11 @@
-{ mkShell, callPackage, libjack2, pipewire, llvmPackages, stdenv }:
+{
+  mkShell,
+  callPackage,
+  libjack2,
+  pipewire,
+  llvmPackages,
+  stdenv,
+}:
 mkShell {
   # Get dependencies from the main package
   inputsFrom = [ (callPackage ./default.nix { }) ];

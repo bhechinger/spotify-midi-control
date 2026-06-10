@@ -110,7 +110,7 @@
       );
 
       overlays.default = final: _prev: {
-        spotify-midi-control = self.packages.${final.system}.spotify-midi-control;
+        spotify-midi-control = self.packages.${final.stdenv.hostPlatform.system}.spotify-midi-control;
       };
 
       nixosModules.default =
@@ -118,7 +118,8 @@
         {
           imports = [ ./module.nix ];
           nixpkgs.overlays = [ self.overlays.default ];
-          _module.args.spotify-midi-control-package = self.packages.${pkgs.system}.spotify-midi-control;
+          _module.args.spotify-midi-control-package =
+            self.packages.${pkgs.stdenv.hostPlatform.system}.spotify-midi-control;
           _module.args.systemd-service-style = "nixos";
         };
 
@@ -126,7 +127,8 @@
         { pkgs, ... }:
         {
           imports = [ ./module.nix ];
-          _module.args.spotify-midi-control-package = self.packages.${pkgs.system}.spotify-midi-control;
+          _module.args.spotify-midi-control-package =
+            self.packages.${pkgs.stdenv.hostPlatform.system}.spotify-midi-control;
           _module.args.systemd-service-style = "home-manager";
         };
     };

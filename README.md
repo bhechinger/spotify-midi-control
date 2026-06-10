@@ -7,16 +7,26 @@
 For PipeWire, start the program in the dev shell and connect your controller to the `spotify control` MIDI input in qpwgraph:
 
 ```sh
-nix develop --command cargo run -- --backend pipewire
+nix develop --command cargo run -- \
+  --backend pipewire \
+  --play-command 176,41,127 \
+  --pause-command 176,42,127 \
+  --previous-command 176,58,127 \
+  --next-command 176,59,127
 ```
 
 For JACK, run:
 
 ```sh
-nix develop --command cargo run -- --backend jack
+nix develop --command cargo run -- \
+  --backend jack \
+  --play-command 176,41,127 \
+  --pause-command 176,42,127 \
+  --previous-command 176,58,127 \
+  --next-command 176,59,127
 ```
 
-The default MIDI bindings are control-change messages on channel 0: Play is `176,41,127`, Pause is `176,42,127`, Previous is `176,58,127`, and Next is `176,59,127`. You can override them on the command line:
+The example MIDI bindings used below are control-change messages on channel 0: Play is `176,41,127`, Pause is `176,42,127`, Previous is `176,58,127`, and Next is `176,59,127`. The program requires command values in normal mode; provide them on the command line, through environment variables, or through the Nix module:
 
 ```sh
 spotify-midi-control \
@@ -64,6 +74,13 @@ For a NixOS configuration, add the input and import the module in your host conf
           services.spotify-midi-control = {
             enable = true;
             backend = "pipewire";
+
+            midiCommands = {
+              play = [ 176 41 127 ];
+              pause = [ 176 42 127 ];
+              previous = [ 176 58 127 ];
+              next = [ 176 59 127 ];
+            };
           };
         }
       ];
@@ -91,6 +108,13 @@ For standalone Home Manager, import the Home Manager module instead:
             services.spotify-midi-control = {
               enable = true;
               backend = "pipewire";
+
+              midiCommands = {
+                play = [ 176 41 127 ];
+                pause = [ 176 42 127 ];
+                previous = [ 176 58 127 ];
+                next = [ 176 59 127 ];
+              };
             };
           }
         ];
@@ -103,7 +127,7 @@ The NixOS module adds the package overlay automatically. The Home Manager module
 
 ## NixOS and Home Manager options
 
-The module exposes a user service at `services.spotify-midi-control`. A typical PipeWire setup looks like this:
+The module exposes a user service at `services.spotify-midi-control`. A typical PipeWire setup looks like this. The `midiCommands` values are required; these example values are kept here as a starting point:
 
 ```nix
 services.spotify-midi-control = {

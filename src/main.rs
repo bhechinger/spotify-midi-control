@@ -1,24 +1,53 @@
-use std::env;
 use std::error::Error;
 use std::io;
 use std::mem;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::thread;
 
+use clap::{Parser, ValueEnum};
+
 mod midi;
 mod spotify;
 
 const MAX_MIDI: usize = 3;
 const DEFAULT_CLIENT_NAME: &str = "spotify control";
-const DEFAULT_PLAY_COMMAND: &str = "176,41,127";
-const DEFAULT_PAUSE_COMMAND: &str = "176,42,127";
-const DEFAULT_PREVIOUS_COMMAND: &str = "176,58,127";
-const DEFAULT_NEXT_COMMAND: &str = "176,59,127";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum Backend {
     Jack,
+    #[value(name = "pipewire", alias = "pw")]
     PipeWire,
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Args {
+    #[arg(long, value_enum, env = "SPOTIFY_MIDI_BACKEND", default_value = "jack")]
+    backend: Backend,
+
+    #[arg(long, env = "SPOTIFY_MIDI_CLIENT_NAME", default_value = DEFAULT_CLIENT_NAME)]
+    client_name: String,
+
+    #[arg(long, env = "SPOTIFY_MIDI_PIPEWIRE_REMOTE")]
+    pipewire_remote: Option<String>,
+
+    #[arg(long, env = "SPOTIFY_MIDI_PIPEWIRE_TARGET")]
+    pipewire_target: Option<u32>,
+
+    #[arg(long, env = "SPOTIFY_MIDI_LEARN")]
+    learn: bool,
+
+    #[arg(long, env = "SPOTIFY_MIDI_PLAY_COMMAND", value_parser = parse_midi_command, required_unless_present = "learn")]
+    play_command: Option<MidiCommand>,
+
+    #[arg(long, env = "SPOTIFY_MIDI_PAUSE_COMMAND", value_parser = parse_midi_command, required_unless_present = "learn")]
+    pause_command: Option<MidiCommand>,
+
+    #[arg(long, env = "SPOTIFY_MIDI_PREVIOUS_COMMAND", value_parser = parse_midi_command, required_unless_present = "learn")]
+    previous_command: Option<MidiCommand>,
+
+    #[arg(long, env = "SPOTIFY_MIDI_NEXT_COMMAND", value_parser = parse_midi_command, required_unless_present = "learn")]
+    next_command: Option<MidiCommand>,
 }
 
 struct Config {
@@ -27,90 +56,39 @@ struct Config {
     pipewire_remote: Option<String>,
     pipewire_target: Option<u32>,
     learning_mode: bool,
-    midi_bindings: MidiBindings,
+    midi_bindings: Option<MidiBindings>,
 }
 
 impl Config {
-    fn from_env_and_args() -> Result<Self, Box<dyn Error>> {
-        let mut config = Config {
-            backend: env::var("SPOTIFY_MIDI_BACKEND")
-                .ok()
-                .as_deref()
-                .map(parse_backend)
-                .transpose()?
-                .unwrap_or(Backend::Jack),
-            client_name: env::var("SPOTIFY_MIDI_CLIENT_NAME")
-                .unwrap_or_else(|_| DEFAULT_CLIENT_NAME.to_string()),
-            pipewire_remote: env::var("SPOTIFY_MIDI_PIPEWIRE_REMOTE").ok(),
-            pipewire_target: env::var("SPOTIFY_MIDI_PIPEWIRE_TARGET")
-                .ok()
-                .map(|value| value.parse())
-                .transpose()?,
-            midi_bindings: MidiBindings::from_env()?,
-            learning_mode: parse_bool_env("SPOTIFY_MIDI_LEARN")?,
+    fn from_args() -> Result<Self, Box<dyn Error>> {
+        let args = Args::parse();
+        let midi_bindings = if args.learn {
+            None
+        } else {
+            Some(MidiBindings {
+                play: args
+                    .play_command
+                    .ok_or("--play-command or SPOTIFY_MIDI_PLAY_COMMAND is required")?,
+                pause: args
+                    .pause_command
+                    .ok_or("--pause-command or SPOTIFY_MIDI_PAUSE_COMMAND is required")?,
+                previous: args
+                    .previous_command
+                    .ok_or("--previous-command or SPOTIFY_MIDI_PREVIOUS_COMMAND is required")?,
+                next: args
+                    .next_command
+                    .ok_or("--next-command or SPOTIFY_MIDI_NEXT_COMMAND is required")?,
+            })
         };
 
-        let mut args = env::args().skip(1);
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--backend" => {
-                    let value = args.next().ok_or("--backend requires jack or pipewire")?;
-                    config.backend = parse_backend(&value)?;
-                }
-                "--client-name" => {
-                    config.client_name = args.next().ok_or("--client-name requires a value")?;
-                }
-                "--pipewire-remote" => {
-                    config.pipewire_remote =
-                        Some(args.next().ok_or("--pipewire-remote requires a value")?);
-                }
-                "--pipewire-target" => {
-                    config.pipewire_target = Some(
-                        args.next()
-                            .ok_or("--pipewire-target requires a node id")?
-                            .parse()?,
-                    );
-                }
-                "--play-command" => {
-                    config.midi_bindings.play = parse_midi_command(
-                        &args
-                            .next()
-                            .ok_or("--play-command requires bytes like 176,41,127")?,
-                    )?;
-                }
-                "--pause-command" => {
-                    config.midi_bindings.pause = parse_midi_command(
-                        &args
-                            .next()
-                            .ok_or("--pause-command requires bytes like 176,42,127")?,
-                    )?;
-                }
-                "--previous-command" => {
-                    config.midi_bindings.previous = parse_midi_command(
-                        &args
-                            .next()
-                            .ok_or("--previous-command requires bytes like 176,58,127")?,
-                    )?;
-                }
-                "--next-command" => {
-                    config.midi_bindings.next = parse_midi_command(
-                        &args
-                            .next()
-                            .ok_or("--next-command requires bytes like 176,59,127")?,
-                    )?;
-                }
-                "--learn" => {
-                    config.learning_mode = true;
-                }
-                "-h" | "--help" => {
-                    print_help();
-                    std::process::exit(0);
-                }
-                unknown => return Err(format!("unknown argument: {unknown}").into()),
-            }
-        }
-
-        Ok(config)
+        Ok(Self {
+            backend: args.backend,
+            client_name: args.client_name,
+            pipewire_remote: args.pipewire_remote,
+            pipewire_target: args.pipewire_target,
+            learning_mode: args.learn,
+            midi_bindings,
+        })
     }
 }
 
@@ -135,18 +113,6 @@ struct MidiBindings {
 }
 
 impl MidiBindings {
-    fn from_env() -> Result<Self, Box<dyn Error>> {
-        Ok(Self {
-            play: parse_midi_command_env("SPOTIFY_MIDI_PLAY_COMMAND", DEFAULT_PLAY_COMMAND)?,
-            pause: parse_midi_command_env("SPOTIFY_MIDI_PAUSE_COMMAND", DEFAULT_PAUSE_COMMAND)?,
-            previous: parse_midi_command_env(
-                "SPOTIFY_MIDI_PREVIOUS_COMMAND",
-                DEFAULT_PREVIOUS_COMMAND,
-            )?,
-            next: parse_midi_command_env("SPOTIFY_MIDI_NEXT_COMMAND", DEFAULT_NEXT_COMMAND)?,
-        })
-    }
-
     fn action_for(&self, midi: &midi::MidiCopy) -> Option<&str> {
         if self.play.matches(midi) {
             Some("Play")
@@ -162,19 +128,16 @@ impl MidiBindings {
     }
 }
 
-fn parse_midi_command_env(name: &str, default: &str) -> Result<MidiCommand, Box<dyn Error>> {
-    let value = env::var(name).unwrap_or_else(|_| default.to_string());
-    parse_midi_command(&value)
-}
-
-fn parse_midi_command(value: &str) -> Result<MidiCommand, Box<dyn Error>> {
+fn parse_midi_command(value: &str) -> Result<MidiCommand, String> {
     let parts: Vec<&str> = value
         .split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect();
     if parts.is_empty() || parts.len() > MAX_MIDI {
-        return Err(format!("MIDI command {value:?} must contain 1 to {MAX_MIDI} bytes").into());
+        return Err(format!(
+            "MIDI command {value:?} must contain 1 to {MAX_MIDI} bytes"
+        ));
     }
 
     let mut bytes = [0; MAX_MIDI];
@@ -188,53 +151,33 @@ fn parse_midi_command(value: &str) -> Result<MidiCommand, Box<dyn Error>> {
     })
 }
 
-fn parse_midi_byte(value: &str) -> Result<u8, Box<dyn Error>> {
-    let parsed = if let Some(hex) = value.strip_prefix("0x") {
-        u8::from_str_radix(hex, 16)?
+fn parse_midi_byte(value: &str) -> Result<u8, String> {
+    if let Some(hex) = value.strip_prefix("0x") {
+        u8::from_str_radix(hex, 16).map_err(|err| format!("invalid MIDI byte {value:?}: {err}"))
     } else if let Some(binary) = value.strip_prefix("0b") {
-        u8::from_str_radix(binary, 2)?
+        u8::from_str_radix(binary, 2).map_err(|err| format!("invalid MIDI byte {value:?}: {err}"))
     } else {
-        value.parse()?
-    };
-    Ok(parsed)
-}
-
-fn parse_bool_env(name: &str) -> Result<bool, Box<dyn Error>> {
-    match env::var(name)
-        .ok()
-        .as_deref()
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        None | Some("") | Some("0") | Some("false") | Some("no") | Some("off") => Ok(false),
-        Some("1") | Some("true") | Some("yes") | Some("on") => Ok(true),
-        Some(value) => Err(format!("{name} must be true or false, got {value:?}").into()),
+        value
+            .parse()
+            .map_err(|err| format!("invalid MIDI byte {value:?}: {err}"))
     }
-}
-
-fn parse_backend(value: &str) -> Result<Backend, Box<dyn Error>> {
-    match value.to_ascii_lowercase().as_str() {
-        "jack" => Ok(Backend::Jack),
-        "pipewire" | "pw" => Ok(Backend::PipeWire),
-        _ => Err(format!("unsupported backend {value:?}; expected jack or pipewire").into()),
-    }
-}
-
-fn print_help() {
-    println!(
-        "spotify-midi-control\n\n  --backend <jack|pipewire>\n  --client-name <name>\n  --pipewire-remote <remote>\n  --pipewire-target <node-id>\n  --learn\n  --play-command <bytes>\n  --pause-command <bytes>\n  --previous-command <bytes>\n  --next-command <bytes>\n\nMIDI command bytes are comma-separated, for example 176,41,127 or 0xB0,41,127.\n\nEnvironment equivalents:\n  SPOTIFY_MIDI_BACKEND\n  SPOTIFY_MIDI_CLIENT_NAME\n  SPOTIFY_MIDI_PIPEWIRE_REMOTE\n  SPOTIFY_MIDI_PIPEWIRE_TARGET\n  SPOTIFY_MIDI_LEARN\n  SPOTIFY_MIDI_PLAY_COMMAND\n  SPOTIFY_MIDI_PAUSE_COMMAND\n  SPOTIFY_MIDI_PREVIOUS_COMMAND\n  SPOTIFY_MIDI_NEXT_COMMAND"
-    );
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let config = Config::from_env_and_args()?;
+    let config = Config::from_args()?;
 
     let (sender, receiver) = sync_channel(64);
     let _controller = if config.learning_mode {
         spawn_learning_controller(receiver)
     } else {
         let spotify_sender = sender.clone();
-        spawn_controller(receiver, spotify_sender, config.midi_bindings)
+        spawn_controller(
+            receiver,
+            spotify_sender,
+            config
+                .midi_bindings
+                .expect("MIDI bindings are validated before startup"),
+        )
     };
 
     match config.backend {

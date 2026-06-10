@@ -55,42 +55,22 @@ in
     };
     midiCommands = {
       play = mkOption {
-        type = types.listOf types.int;
-        default = [
-          176
-          41
-          127
-        ];
+        type = types.nonEmptyListOf (types.ints.between 0 255);
         description = "MIDI bytes that trigger Play.";
       };
 
       pause = mkOption {
-        type = types.listOf types.int;
-        default = [
-          176
-          42
-          127
-        ];
+        type = types.nonEmptyListOf (types.ints.between 0 255);
         description = "MIDI bytes that trigger Pause.";
       };
 
       previous = mkOption {
-        type = types.listOf types.int;
-        default = [
-          176
-          58
-          127
-        ];
+        type = types.nonEmptyListOf (types.ints.between 0 255);
         description = "MIDI bytes that trigger Previous.";
       };
 
       next = mkOption {
-        type = types.listOf types.int;
-        default = [
-          176
-          59
-          127
-        ];
+        type = types.nonEmptyListOf (types.ints.between 0 255);
         description = "MIDI bytes that trigger Next.";
       };
     };
@@ -106,12 +86,14 @@ in
           "${cfg.package}/bin/spotify-midi-control"
           "--backend ${escapeShellArg cfg.backend}"
           "--client-name ${escapeShellArg cfg.clientName}"
+        ]
+        ++ optional cfg.learn "--learn"
+        ++ optionals (!cfg.learn) [
           "--play-command ${escapeShellArg (midiCommand cfg.midiCommands.play)}"
           "--pause-command ${escapeShellArg (midiCommand cfg.midiCommands.pause)}"
           "--previous-command ${escapeShellArg (midiCommand cfg.midiCommands.previous)}"
           "--next-command ${escapeShellArg (midiCommand cfg.midiCommands.next)}"
         ]
-        ++ optional cfg.learn "--learn"
         ++ optionals (cfg.backend == "pipewire") (
           optional (cfg.pipewireRemote != null) "--pipewire-remote ${escapeShellArg cfg.pipewireRemote}"
           ++ optional (cfg.pipewireTarget != null) "--pipewire-target ${toString cfg.pipewireTarget}"

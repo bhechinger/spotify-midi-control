@@ -3,12 +3,54 @@
   pkgs,
   config,
   spotify-midi-control-package ? pkgs.spotify-midi-control,
+  systemd-service-style ? "nixos",
   ...
 }:
 with lib;
 let
   cfg = config.services.spotify-midi-control;
   midiCommand = command: concatMapStringsSep "," toString command;
+  command = concatStringsSep " " (
+    [
+      "${cfg.package}/bin/spotify-midi-control"
+      "--backend ${escapeShellArg cfg.backend}"
+      "--client-name ${escapeShellArg cfg.clientName}"
+    ]
+    ++ optional cfg.learn "--learn"
+    ++ optionals (!cfg.learn) [
+      "--play-command ${escapeShellArg (midiCommand cfg.midiCommands.play)}"
+      "--pause-command ${escapeShellArg (midiCommand cfg.midiCommands.pause)}"
+      "--previous-command ${escapeShellArg (midiCommand cfg.midiCommands.previous)}"
+      "--next-command ${escapeShellArg (midiCommand cfg.midiCommands.next)}"
+    ]
+    ++ optionals (cfg.backend == "pipewire") (
+      optional (cfg.pipewireRemote != null) "--pipewire-remote ${escapeShellArg cfg.pipewireRemote}"
+      ++ optional (cfg.pipewireTarget != null) "--pipewire-target ${toString cfg.pipewireTarget}"
+    )
+  );
+  service =
+    if systemd-service-style == "home-manager" then
+      {
+        Unit = {
+          Wants = optional (cfg.backend == "pipewire") "pipewire.service";
+          After = optional (cfg.backend == "pipewire") "pipewire.service";
+        };
+
+        Service = {
+          ExecStart = command;
+        };
+
+        Install = {
+          WantedBy = [ "default.target" ];
+        };
+      }
+    else
+      {
+        wants = optional (cfg.backend == "pipewire") "pipewire.service";
+        after = optional (cfg.backend == "pipewire") "pipewire.service";
+        wantedBy = [ "default.target" ];
+        serviceConfig.ExecStart = command;
+      };
 in
 {
   options.services.spotify-midi-control = {
@@ -77,28 +119,6 @@ in
   };
 
   config = mkIf cfg.enable {
-    systemd.user.services.spotify-midi-control = {
-      wants = optional (cfg.backend == "pipewire") "pipewire.service";
-      after = optional (cfg.backend == "pipewire") "pipewire.service";
-      wantedBy = [ "default.target" ];
-      serviceConfig.ExecStart = concatStringsSep " " (
-        [
-          "${cfg.package}/bin/spotify-midi-control"
-          "--backend ${escapeShellArg cfg.backend}"
-          "--client-name ${escapeShellArg cfg.clientName}"
-        ]
-        ++ optional cfg.learn "--learn"
-        ++ optionals (!cfg.learn) [
-          "--play-command ${escapeShellArg (midiCommand cfg.midiCommands.play)}"
-          "--pause-command ${escapeShellArg (midiCommand cfg.midiCommands.pause)}"
-          "--previous-command ${escapeShellArg (midiCommand cfg.midiCommands.previous)}"
-          "--next-command ${escapeShellArg (midiCommand cfg.midiCommands.next)}"
-        ]
-        ++ optionals (cfg.backend == "pipewire") (
-          optional (cfg.pipewireRemote != null) "--pipewire-remote ${escapeShellArg cfg.pipewireRemote}"
-          ++ optional (cfg.pipewireTarget != null) "--pipewire-target ${toString cfg.pipewireTarget}"
-        )
-      );
-    };
+    systemd.user.services.spotify-midi-control = service;
   };
 }

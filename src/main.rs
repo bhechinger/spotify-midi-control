@@ -3,10 +3,12 @@ use std::io::{self, IsTerminal};
 use std::mem;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::thread;
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 
 mod midi;
+mod rt_midi_queue;
 mod spotify;
 
 const MAX_MIDI: usize = 3;
@@ -167,6 +169,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::from_args()?;
 
     let (sender, receiver) = sync_channel(64);
+    let (rt_producer, rt_consumer) = rt_midi_queue::channel(256);
+    let _midi_forwarder = spawn_midi_forwarder(rt_consumer, sender.clone());
     let _controller = if config.learning_mode {
         spawn_learning_controller(receiver)
     } else {
@@ -181,11 +185,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     match config.backend {
-        Backend::Jack => run_jack(&config.client_name, sender)?,
-        Backend::PipeWire => run_pipewire(&config, sender)?,
+        Backend::Jack => run_jack(&config.client_name, rt_producer)?,
+        Backend::PipeWire => run_pipewire(&config, rt_producer)?,
     }
 
     Ok(())
+}
+
+fn spawn_midi_forwarder(
+    mut consumer: rt_midi_queue::Consumer,
+    sender: SyncSender<midi::MidiCopy>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || loop {
+        while let Some(midi) = consumer.try_pop() {
+            let _ = sender.try_send(midi);
+        }
+        thread::sleep(Duration::from_millis(1));
+    })
 }
 
 fn spawn_learning_controller(receiver: Receiver<midi::MidiCopy>) -> thread::JoinHandle<()> {
@@ -244,13 +260,16 @@ fn spawn_controller(
     })
 }
 
-fn run_jack(client_name: &str, sender: SyncSender<midi::MidiCopy>) -> Result<(), Box<dyn Error>> {
+fn run_jack(
+    client_name: &str,
+    mut producer: rt_midi_queue::Producer,
+) -> Result<(), Box<dyn Error>> {
     let (client, _status) = jack::Client::new(client_name, jack::ClientOptions::NO_START_SERVER)?;
     let midi_in = client.register_port("MIDI In", jack::MidiIn)?;
 
     let callback = move |_: &jack::Client, ps: &jack::ProcessScope| -> jack::Control {
         for event in midi_in.iter(ps) {
-            let _ = sender.try_send(event.into());
+            let _ = producer.try_push(event.into());
         }
         jack::Control::Continue
     };
@@ -275,7 +294,7 @@ fn wait_for_quit() {
     }
 }
 
-fn run_pipewire(config: &Config, sender: SyncSender<midi::MidiCopy>) -> Result<(), Box<dyn Error>> {
+fn run_pipewire(config: &Config, producer: rt_midi_queue::Producer) -> Result<(), Box<dyn Error>> {
     use libspa::pod::Pod;
     use pipewire as pw;
     use pw::properties::properties;
@@ -297,18 +316,18 @@ fn run_pipewire(config: &Config, sender: SyncSender<midi::MidiCopy>) -> Result<(
     let props = pipewire_stream_props(config.pipewire_target);
     let stream = pw::stream::StreamBox::new(&core, &config.client_name, props)?;
     let _listener = stream
-        .add_local_listener_with_user_data(sender)
+        .add_local_listener_with_user_data(producer)
         .state_changed(|_, _, old, new| {
             println!("PipeWire state changed: {:?} -> {:?}", old, new);
         })
-        .process(|stream, sender| {
+        .process(|stream, producer| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
 
-            for message in pipewire_midi_messages(&mut buffer) {
-                let _ = sender.try_send(message);
-            }
+            for_each_pipewire_midi_message(&mut buffer, |message| {
+                let _ = producer.try_push(message);
+            });
         })
         .register()?;
 
@@ -329,7 +348,7 @@ fn run_pipewire(config: &Config, sender: SyncSender<midi::MidiCopy>) -> Result<(
     stream.connect(
         spa::utils::Direction::Input,
         config.pipewire_target,
-        pw::stream::StreamFlags::MAP_BUFFERS | pw::stream::StreamFlags::DONT_RECONNECT,
+        pipewire_stream_flags(),
         &mut params,
     )?;
 
@@ -363,6 +382,14 @@ fn run_pipewire(config: &Config, sender: SyncSender<midi::MidiCopy>) -> Result<(
     Ok(())
 }
 
+fn pipewire_stream_flags() -> pipewire::stream::StreamFlags {
+    use pipewire as pw;
+
+    pw::stream::StreamFlags::MAP_BUFFERS
+        | pw::stream::StreamFlags::DONT_RECONNECT
+        | pw::stream::StreamFlags::RT_PROCESS
+}
+
 fn pipewire_stream_props(pipewire_target: Option<u32>) -> pipewire::properties::PropertiesBox {
     use pipewire as pw;
     use pw::properties::properties;
@@ -371,8 +398,6 @@ fn pipewire_stream_props(pipewire_target: Option<u32>) -> pipewire::properties::
         *pw::keys::MEDIA_TYPE => "Midi",
         *pw::keys::MEDIA_CATEGORY => "Capture",
         *pw::keys::MEDIA_ROLE => "Control",
-        *pw::keys::STREAM_IS_LIVE => "false",
-        "node.want-driver" => "false",
         *pw::keys::NODE_AUTOCONNECT => "false",
         *pw::keys::NODE_DONT_RECONNECT => "true",
     };
@@ -383,9 +408,10 @@ fn pipewire_stream_props(pipewire_target: Option<u32>) -> pipewire::properties::
     props
 }
 
-fn pipewire_midi_messages(buffer: &mut pipewire::buffer::Buffer<'_>) -> Vec<midi::MidiCopy> {
-    let mut messages = Vec::new();
-
+fn for_each_pipewire_midi_message(
+    buffer: &mut pipewire::buffer::Buffer<'_>,
+    mut handler: impl FnMut(midi::MidiCopy),
+) {
     for data in buffer.datas_mut() {
         let start = data.chunk().offset() as usize;
         let size = data.chunk().size() as usize;
@@ -397,25 +423,22 @@ fn pipewire_midi_messages(buffer: &mut pipewire::buffer::Buffer<'_>) -> Vec<midi
             continue;
         }
 
-        messages.extend(parse_spa_midi_sequence(&bytes[start..end]));
+        for_each_spa_midi_sequence(&bytes[start..end], &mut handler);
     }
-
-    messages
 }
 
-fn parse_spa_midi_sequence(bytes: &[u8]) -> Vec<midi::MidiCopy> {
-    let mut messages = Vec::new();
+fn for_each_spa_midi_sequence(bytes: &[u8], handler: &mut impl FnMut(midi::MidiCopy)) {
     let Some(pod) = libspa::pod::Pod::from_bytes(bytes) else {
-        return messages;
+        return;
     };
     if pod.type_() != libspa::utils::SpaTypes::Sequence {
-        return messages;
+        return;
     }
 
     let pod_size = pod.size() as usize;
     let sequence_body_size = mem::size_of::<libspa::sys::spa_pod_sequence_body>();
     if pod_size < sequence_body_size {
-        return messages;
+        return;
     }
 
     let mut offset = sequence_body_size;
@@ -442,13 +465,11 @@ fn parse_spa_midi_sequence(bytes: &[u8]) -> Vec<midi::MidiCopy> {
                     value_size,
                 )
             };
-            messages.push(midi::MidiCopy::from_bytes(value, control.offset));
+            handler(midi::MidiCopy::from_bytes(value, control.offset));
         }
 
         offset += align_pod_size(control_size);
     }
-
-    messages
 }
 
 fn align_pod_size(size: usize) -> usize {
@@ -466,10 +487,34 @@ mod tests {
         assert_eq!(props.get("media.type"), Some("Midi"));
         assert_eq!(props.get("media.category"), Some("Capture"));
         assert_eq!(props.get("media.role"), Some("Control"));
-        assert_eq!(props.get("stream.is-live"), Some("false"));
-        assert_eq!(props.get("node.want-driver"), Some("false"));
+        assert_eq!(props.get("stream.is-live"), None);
+        assert_eq!(props.get("node.want-driver"), None);
         assert_eq!(props.get("node.autoconnect"), Some("false"));
         assert_eq!(props.get("node.dont-reconnect"), Some("true"));
+    }
+
+    #[test]
+    fn realtime_midi_queue_preserves_events_without_blocking() {
+        let (mut producer, mut consumer) = rt_midi_queue::channel(2);
+        let first = midi::MidiCopy::from_bytes(&[176, 41, 127], 0);
+        let second = midi::MidiCopy::from_bytes(&[176, 42, 0], 1);
+
+        assert!(producer.try_push(first).is_ok());
+        assert!(producer.try_push(second).is_ok());
+        assert!(producer.try_push(first).is_err());
+
+        assert_eq!(consumer.try_pop(), Some(first));
+        assert_eq!(consumer.try_pop(), Some(second));
+        assert_eq!(consumer.try_pop(), None);
+    }
+
+    #[test]
+    fn pipewire_stream_flags_enable_realtime_processing() {
+        let flags = pipewire_stream_flags();
+
+        assert!(flags.contains(pipewire::stream::StreamFlags::RT_PROCESS));
+        assert!(flags.contains(pipewire::stream::StreamFlags::MAP_BUFFERS));
+        assert!(flags.contains(pipewire::stream::StreamFlags::DONT_RECONNECT));
     }
 
     #[test]

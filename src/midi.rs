@@ -1,6 +1,6 @@
 use crate::MAX_MIDI;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub struct MidiCopy {
     pub len: usize,
     pub data: [u8; MAX_MIDI],

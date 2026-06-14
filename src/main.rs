@@ -294,15 +294,7 @@ fn run_pipewire(config: &Config, sender: SyncSender<midi::MidiCopy>) -> Result<(
     });
     let core = context.connect_rc(core_props)?;
 
-    let mut props = properties! {
-        *pw::keys::MEDIA_TYPE => "Midi",
-        *pw::keys::MEDIA_CATEGORY => "Capture",
-        *pw::keys::MEDIA_ROLE => "Music",
-    };
-    if let Some(target) = config.pipewire_target {
-        props.insert("target.object", target.to_string());
-    }
-
+    let props = pipewire_stream_props(config.pipewire_target);
     let stream = pw::stream::StreamBox::new(&core, &config.client_name, props)?;
     let _listener = stream
         .add_local_listener_with_user_data(sender)
@@ -337,7 +329,7 @@ fn run_pipewire(config: &Config, sender: SyncSender<midi::MidiCopy>) -> Result<(
     stream.connect(
         spa::utils::Direction::Input,
         config.pipewire_target,
-        pw::stream::StreamFlags::MAP_BUFFERS,
+        pw::stream::StreamFlags::MAP_BUFFERS | pw::stream::StreamFlags::DONT_RECONNECT,
         &mut params,
     )?;
 
@@ -369,6 +361,26 @@ fn run_pipewire(config: &Config, sender: SyncSender<midi::MidiCopy>) -> Result<(
     }
 
     Ok(())
+}
+
+fn pipewire_stream_props(pipewire_target: Option<u32>) -> pipewire::properties::PropertiesBox {
+    use pipewire as pw;
+    use pw::properties::properties;
+
+    let mut props = properties! {
+        *pw::keys::MEDIA_TYPE => "Midi",
+        *pw::keys::MEDIA_CATEGORY => "Capture",
+        *pw::keys::MEDIA_ROLE => "Control",
+        *pw::keys::STREAM_IS_LIVE => "false",
+        "node.want-driver" => "false",
+        *pw::keys::NODE_AUTOCONNECT => "false",
+        *pw::keys::NODE_DONT_RECONNECT => "true",
+    };
+    if let Some(target) = pipewire_target {
+        props.insert("target.object", target.to_string());
+    }
+
+    props
 }
 
 fn pipewire_midi_messages(buffer: &mut pipewire::buffer::Buffer<'_>) -> Vec<midi::MidiCopy> {
@@ -441,4 +453,29 @@ fn parse_spa_midi_sequence(bytes: &[u8]) -> Vec<midi::MidiCopy> {
 
 fn align_pod_size(size: usize) -> usize {
     (size + 7) & !7
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipewire_stream_props_do_not_request_live_driver_scheduling() {
+        let props = pipewire_stream_props(None);
+
+        assert_eq!(props.get("media.type"), Some("Midi"));
+        assert_eq!(props.get("media.category"), Some("Capture"));
+        assert_eq!(props.get("media.role"), Some("Control"));
+        assert_eq!(props.get("stream.is-live"), Some("false"));
+        assert_eq!(props.get("node.want-driver"), Some("false"));
+        assert_eq!(props.get("node.autoconnect"), Some("false"));
+        assert_eq!(props.get("node.dont-reconnect"), Some("true"));
+    }
+
+    #[test]
+    fn pipewire_stream_props_preserve_explicit_target() {
+        let props = pipewire_stream_props(Some(123));
+
+        assert_eq!(props.get("target.object"), Some("123"));
+    }
 }

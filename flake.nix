@@ -119,6 +119,17 @@
               nixpkgs.lib.concatStringsSep "\n" homeManagerExecStartValue
             else
               homeManagerExecStartValue;
+          learnExecStart =
+            (nixpkgs.lib.nixosSystem {
+              inherit system;
+              modules = [
+                self.nixosModules.default
+                testServiceConfig
+                {
+                  services.spotify-midi-control.learn = true;
+                }
+              ];
+            }).config.systemd.user.services.spotify-midi-control.serviceConfig.ExecStart;
           tooLongMidiCommandRejected =
             let
               badExecStart =
@@ -155,13 +166,52 @@
                 touch "$out"
               '';
 
-          nixos-module = pkgs.runCommand "spotify-midi-control-nixos-module-check" {
-            execStart = nixosExecStart;
-          } "test -n \"$execStart\"; touch \"$out\"";
+          nixos-module =
+            pkgs.runCommand "spotify-midi-control-nixos-module-check"
+              {
+                execStart = nixosExecStart;
+              }
+              ''
+                [[ "$execStart" == *"--backend pipewire"* ]]
+                [[ "$execStart" == *"--client-name 'spotify control'"* ]]
+                [[ "$execStart" == *"--play-command 176,41,127"* ]]
+                [[ "$execStart" == *"--pause-command 176,42,127"* ]]
+                [[ "$execStart" == *"--previous-command 176,58,127"* ]]
+                [[ "$execStart" == *"--next-command 176,59,127"* ]]
+                [[ "$execStart" != *"--learn"* ]]
+                touch "$out"
+              '';
 
-          home-manager-module = pkgs.runCommand "spotify-midi-control-home-manager-module-check" {
-            execStart = homeManagerExecStart;
-          } "test -n \"$execStart\"; touch \"$out\"";
+          home-manager-module =
+            pkgs.runCommand "spotify-midi-control-home-manager-module-check"
+              {
+                execStart = homeManagerExecStart;
+              }
+              ''
+                [[ "$execStart" == *"--backend pipewire"* ]]
+                [[ "$execStart" == *"--client-name 'spotify control'"* ]]
+                [[ "$execStart" == *"--play-command 176,41,127"* ]]
+                [[ "$execStart" == *"--pause-command 176,42,127"* ]]
+                [[ "$execStart" == *"--previous-command 176,58,127"* ]]
+                [[ "$execStart" == *"--next-command 176,59,127"* ]]
+                [[ "$execStart" != *"--learn"* ]]
+                touch "$out"
+              '';
+
+          nixos-module-learn-mode-omits-command-bindings =
+            pkgs.runCommand "spotify-midi-control-nixos-module-learn-mode-omits-command-bindings"
+              {
+                execStart = learnExecStart;
+              }
+              ''
+                [[ "$execStart" == *"--backend pipewire"* ]]
+                [[ "$execStart" == *"--learn"* ]]
+                [[ "$execStart" != *"--play-command"* ]]
+                [[ "$execStart" != *"--pause-command"* ]]
+                [[ "$execStart" != *"--previous-command"* ]]
+                [[ "$execStart" != *"--next-command"* ]]
+                touch "$out"
+              '';
 
           nixos-module-rejects-too-long-midi-command =
             pkgs.runCommand "spotify-midi-control-nixos-module-rejects-too-long-midi-command"

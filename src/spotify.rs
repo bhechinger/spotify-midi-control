@@ -16,7 +16,7 @@ pub enum Action {
 }
 
 impl Action {
-    fn mpris_method(self) -> &'static str {
+    pub(crate) fn mpris_method(self) -> &'static str {
         match self {
             Action::Play => "Play",
             Action::Pause => "Pause",
@@ -42,7 +42,7 @@ impl Spotify {
     }
 
     pub fn handle_action(&mut self, action: Action) -> Result<(), rustbus::connection::Error> {
-        let call = self.call(action.mpris_method());
+        let call = call(action);
         self.connection
             .send
             .send_message(&call)?
@@ -51,13 +51,43 @@ impl Spotify {
 
         Ok(())
     }
+}
 
-    fn call(&self, method: &str) -> MarshalledMessage {
-        MessageBuilder::new()
-            .call(method)
-            .with_interface("org.mpris.MediaPlayer2.Player")
-            .on(SPOTIFY_PATH)
-            .at(SPOTIFY_DST)
-            .build()
+fn call(action: Action) -> MarshalledMessage {
+    MessageBuilder::new()
+        .call(action.mpris_method())
+        .with_interface("org.mpris.MediaPlayer2.Player")
+        .on(SPOTIFY_PATH)
+        .at(SPOTIFY_DST)
+        .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustbus::message_builder::MessageType;
+
+    #[test]
+    fn actions_map_to_mpris_method_names() {
+        assert_eq!(Action::Play.mpris_method(), "Play");
+        assert_eq!(Action::Pause.mpris_method(), "Pause");
+        assert_eq!(Action::Previous.mpris_method(), "Previous");
+        assert_eq!(Action::Next.mpris_method(), "Next");
+    }
+
+    #[test]
+    fn call_builds_mpris_player_method_call() {
+        let message = call(Action::Next);
+
+        assert_eq!(message.typ, MessageType::Call);
+        assert_eq!(message.dynheader.member.as_deref(), Some("Next"));
+        assert_eq!(
+            message.dynheader.interface.as_deref(),
+            Some("org.mpris.MediaPlayer2.Player")
+        );
+        assert_eq!(message.dynheader.object.as_deref(), Some(SPOTIFY_PATH));
+        assert_eq!(message.dynheader.destination.as_deref(), Some(SPOTIFY_DST));
+        assert_eq!(message.get_sig(), "");
+        assert!(message.get_buf().is_empty());
     }
 }

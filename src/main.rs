@@ -564,9 +564,46 @@ mod tests {
     }
 
     #[test]
+    fn parse_midi_command_trims_whitespace_and_ignores_empty_segments() {
+        let command = parse_midi_command(" 0xB0, , 41,\t127, ").unwrap();
+
+        assert_eq!(
+            command,
+            MidiCommand {
+                bytes: [176, 41, 127],
+                len: 3,
+            }
+        );
+    }
+
+    #[test]
     fn parse_midi_command_rejects_empty_or_too_long_commands() {
         assert!(parse_midi_command("").is_err());
+        assert!(parse_midi_command(" , , ").is_err());
         assert!(parse_midi_command("176,41,127,1").is_err());
+    }
+
+    #[test]
+    fn parse_midi_command_rejects_invalid_bytes() {
+        for input in ["256", "-1", "0xGG", "0b102", "not-midi"] {
+            let err = parse_midi_command(input).unwrap_err();
+            assert!(
+                err.contains("invalid MIDI byte"),
+                "{input:?} produced unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn midi_command_matching_is_exact_length() {
+        let two_bytes = parse_midi_command("176,41").unwrap();
+        let three_bytes = parse_midi_command("176,41,127").unwrap();
+        let one_byte = parse_midi_command("176").unwrap();
+
+        assert!(three_bytes.matches(&midi::MidiCopy::from_bytes(&[176, 41, 127], 0)));
+        assert!(!two_bytes.matches(&midi::MidiCopy::from_bytes(&[176, 41, 127], 0)));
+        assert!(!three_bytes.matches(&midi::MidiCopy::from_bytes(&[176, 41], 0)));
+        assert!(one_byte.matches(&midi::MidiCopy::from_bytes(&[176], 0)));
     }
 
     #[test]
@@ -611,6 +648,51 @@ mod tests {
     }
 
     #[test]
+    fn args_require_commands_unless_learning() {
+        assert!(Args::try_parse_from(["spotify-midi-control", "--learn"]).is_ok());
+
+        let err = Args::try_parse_from(["spotify-midi-control"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn args_parse_backend_alias_and_pipewire_options() {
+        let args = Args::try_parse_from([
+            "spotify-midi-control",
+            "--backend",
+            "pw",
+            "--pipewire-remote",
+            "pipewire-1",
+            "--pipewire-target",
+            "42",
+            "--play-command",
+            "176,41,127",
+            "--pause-command",
+            "176,42,127",
+            "--previous-command",
+            "176,58,127",
+            "--next-command",
+            "176,59,127",
+        ])
+        .unwrap();
+
+        assert_eq!(args.backend, Backend::PipeWire);
+        assert_eq!(args.pipewire_remote.as_deref(), Some("pipewire-1"));
+        assert_eq!(args.pipewire_target, Some(42));
+    }
+
+    #[test]
+    fn midi_command_formatters_emit_cli_and_nix_forms() {
+        let one = midi::MidiCopy::from_bytes(&[176], 0);
+        let three = midi::MidiCopy::from_bytes(&[176, 41, 127], 0);
+
+        assert_eq!(midi_command_string(&one), "176");
+        assert_eq!(midi_command_nix_list(&one), "176");
+        assert_eq!(midi_command_string(&three), "176,41,127");
+        assert_eq!(midi_command_nix_list(&three), "176 41 127");
+    }
+
+    #[test]
     fn spa_midi_sequence_ignores_non_sequence_pod() {
         let bytes = test_pod(libspa::sys::SPA_TYPE_Int, &[1, 0, 0, 0]);
         let mut events = Vec::new();
@@ -623,6 +705,23 @@ mod tests {
     #[test]
     fn spa_midi_sequence_ignores_truncated_sequence_body() {
         let bytes = test_pod(libspa::sys::SPA_TYPE_Sequence, &[0, 0, 0, 0]);
+        let mut events = Vec::new();
+
+        for_each_spa_midi_sequence(&bytes, &mut |event| events.push(event));
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn spa_midi_sequence_ignores_declared_body_larger_than_slice() {
+        let mut bytes = test_pod(libspa::sys::SPA_TYPE_Sequence, &[]);
+        let header = libspa::sys::spa_pod {
+            size: 1024,
+            type_: libspa::sys::SPA_TYPE_Sequence,
+        };
+        bytes.clear();
+        append_plain(&mut bytes, &header);
+        bytes.extend_from_slice(&[0; 4]);
         let mut events = Vec::new();
 
         for_each_spa_midi_sequence(&bytes, &mut |event| events.push(event));
@@ -674,6 +773,31 @@ mod tests {
     }
 
     #[test]
+    fn spa_midi_sequence_ignores_non_midi_and_non_bytes_controls() {
+        let mut body = sequence_body();
+        append_control(
+            &mut body,
+            1,
+            libspa::sys::SPA_CONTROL_Properties,
+            libspa::sys::SPA_TYPE_Bytes,
+            &[1, 2, 3],
+        );
+        append_control(
+            &mut body,
+            2,
+            libspa::sys::SPA_CONTROL_Midi,
+            libspa::sys::SPA_TYPE_Int,
+            &[176, 41, 127, 0],
+        );
+        let bytes = test_pod(libspa::sys::SPA_TYPE_Sequence, &body);
+        let mut events = Vec::new();
+
+        for_each_spa_midi_sequence(&bytes, &mut |event| events.push(event));
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn spa_midi_sequence_emits_valid_midi_control() {
         let bytes = test_midi_sequence(&[176, 41, 127], 11);
         let mut events = Vec::new();
@@ -686,31 +810,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn spa_midi_sequence_emits_multiple_aligned_midi_controls_in_order() {
+        let mut body = sequence_body();
+        append_control(
+            &mut body,
+            11,
+            libspa::sys::SPA_CONTROL_Midi,
+            libspa::sys::SPA_TYPE_Bytes,
+            &[176, 41, 127],
+        );
+        append_control(
+            &mut body,
+            12,
+            libspa::sys::SPA_CONTROL_Properties,
+            libspa::sys::SPA_TYPE_Bytes,
+            &[99],
+        );
+        append_control(
+            &mut body,
+            13,
+            libspa::sys::SPA_CONTROL_Midi,
+            libspa::sys::SPA_TYPE_Bytes,
+            &[176, 59, 127],
+        );
+        let bytes = test_pod(libspa::sys::SPA_TYPE_Sequence, &body);
+        let mut events = Vec::new();
+
+        for_each_spa_midi_sequence(&bytes, &mut |event| events.push(event));
+
+        assert_eq!(
+            events,
+            vec![
+                midi::MidiCopy::from_bytes(&[176, 41, 127], 11),
+                midi::MidiCopy::from_bytes(&[176, 59, 127], 13),
+            ]
+        );
+    }
+
+    #[test]
+    fn read_unaligned_reads_at_offsets_and_rejects_short_slices() {
+        let bytes = [0xAA, 0x44, 0x33, 0x22, 0x11];
+
+        assert_eq!(read_unaligned::<u32>(&bytes, 1), Some(0x11223344));
+        assert_eq!(read_unaligned::<u32>(&bytes, 2), None);
+    }
+
+    #[test]
+    fn align_pod_size_rounds_up_to_eight_bytes_and_detects_overflow() {
+        assert_eq!(align_pod_size(0), Some(0));
+        assert_eq!(align_pod_size(1), Some(8));
+        assert_eq!(align_pod_size(8), Some(8));
+        assert_eq!(align_pod_size(9), Some(16));
+        assert_eq!(align_pod_size(usize::MAX), None);
+    }
+
     fn test_midi_sequence(value: &[u8], offset: u32) -> Vec<u8> {
+        let mut body = sequence_body();
+        append_control(
+            &mut body,
+            offset,
+            libspa::sys::SPA_CONTROL_Midi,
+            libspa::sys::SPA_TYPE_Bytes,
+            value,
+        );
+
+        test_pod(libspa::sys::SPA_TYPE_Sequence, &body)
+    }
+
+    fn sequence_body() -> Vec<u8> {
         let mut body = Vec::new();
         append_plain(
             &mut body,
             &libspa::sys::spa_pod_sequence_body { unit: 0, pad: 0 },
         );
+        body
+    }
+
+    fn append_control(bytes: &mut Vec<u8>, offset: u32, type_: u32, value_type: u32, value: &[u8]) {
         append_plain(
-            &mut body,
+            bytes,
             &libspa::sys::spa_pod_control {
                 offset,
-                type_: libspa::sys::SPA_CONTROL_Midi,
+                type_,
                 value: libspa::sys::spa_pod {
                     size: value.len() as u32,
-                    type_: libspa::sys::SPA_TYPE_Bytes,
+                    type_: value_type,
                 },
             },
         );
-        body.extend_from_slice(value);
+        bytes.extend_from_slice(value);
         let padding = align_pod_size(mem::size_of::<libspa::sys::spa_pod_control>() + value.len())
             .unwrap()
             - mem::size_of::<libspa::sys::spa_pod_control>()
             - value.len();
-        body.resize(body.len() + padding, 0);
-
-        test_pod(libspa::sys::SPA_TYPE_Sequence, &body)
+        bytes.resize(bytes.len() + padding, 0);
     }
 
     fn test_pod(type_: u32, body: &[u8]) -> Vec<u8> {

@@ -36,10 +36,48 @@
         "type": "github"
       }
     },
+    "nixpkgs-npm-package": {
+      "locked": {
+        "lastModified": 1741010256,
+        "narHash": "sha256-WZNlK/KX7Sni0RyqLSqLPbK8k08Kq7H7RijPJbq9KHM=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ba487dbc9d04e0634c64e3b1f0d25839a0a68246",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ba487dbc9d04e0634c64e3b1f0d25839a0a68246",
+        "type": "github"
+      }
+    },
+    "npm-package": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs-npm-package"
+        ]
+      },
+      "locked": {
+        "lastModified": 1741180162,
+        "narHash": "sha256-4rlTM1eFDuR8Hz9WDEZSa3AsQaiSD2QtDCjYOjKi/ow=",
+        "owner": "netbrain",
+        "repo": "npm-package",
+        "rev": "1497926028ff0a253e4308459711f41a560a5272",
+        "type": "github"
+      },
+      "original": {
+        "owner": "netbrain",
+        "repo": "npm-package",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "home-manager": "home-manager",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "nixpkgs-npm-package": "nixpkgs-npm-package",
+        "npm-package": "npm-package"
       }
     }
   },

@@ -8,6 +8,13 @@
       url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    npm-package = {
+      url = "github:netbrain/npm-package";
+      inputs.nixpkgs.follows = "nixpkgs-npm-package";
+    };
+
+    nixpkgs-npm-package.url = "github:NixOS/nixpkgs/ba487dbc9d04e0634c64e3b1f0d25839a0a68246";
   };
 
   outputs =
@@ -15,6 +22,8 @@
       self,
       nixpkgs,
       home-manager,
+      npm-package,
+      ...
     }:
     let
       supportedSystems = [ "x86_64-linux" ];
@@ -63,9 +72,22 @@
         default = self.apps.${system}.spotify-midi-control;
       });
 
-      devShells = forAllSystems (system: {
-        default = pkgsFor.${system}.callPackage ./shell.nix { };
-      });
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor.${system};
+        in
+        {
+          default = (pkgs.callPackage ./shell.nix { }).overrideAttrs (oldAttrs: {
+            nativeBuildInputs = (oldAttrs.nativeBuildInputs or [ ]) ++ [
+              (npm-package.lib.${system}.npmPackage {
+                name = "greptile";
+                version = "3.0.7";
+              })
+            ];
+          });
+        }
+      );
 
       checks = forAllSystems (
         system:

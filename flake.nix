@@ -97,8 +97,42 @@
               nixpkgs.lib.concatStringsSep "\n" homeManagerExecStartValue
             else
               homeManagerExecStartValue;
+          tooLongMidiCommandRejected =
+            let
+              badExecStart =
+                (nixpkgs.lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    self.nixosModules.default
+                    testServiceConfig
+                    {
+                      services.spotify-midi-control.midiCommands.play = [
+                        176
+                        41
+                        127
+                        1
+                      ];
+                    }
+                  ];
+                }).config.systemd.user.services.spotify-midi-control.serviceConfig.ExecStart;
+            in
+            !(builtins.tryEval (builtins.deepSeq badExecStart badExecStart)).success;
         in
         {
+          package = self.packages.${system}.spotify-midi-control;
+
+          rustfmt =
+            pkgs.runCommand "spotify-midi-control-rustfmt-check"
+              {
+                nativeBuildInputs = [ pkgs.rustfmt ];
+              }
+              ''
+                cp -r ${./src} src
+                chmod -R u+w src
+                rustfmt --edition 2021 --check src/*.rs
+                touch "$out"
+              '';
+
           nixos-module = pkgs.runCommand "spotify-midi-control-nixos-module-check" {
             execStart = nixosExecStart;
           } "test -n \"$execStart\"; touch \"$out\"";
@@ -106,6 +140,13 @@
           home-manager-module = pkgs.runCommand "spotify-midi-control-home-manager-module-check" {
             execStart = homeManagerExecStart;
           } "test -n \"$execStart\"; touch \"$out\"";
+
+          nixos-module-rejects-too-long-midi-command =
+            pkgs.runCommand "spotify-midi-control-nixos-module-rejects-too-long-midi-command"
+              {
+                rejected = if tooLongMidiCommandRejected then "1" else "0";
+              }
+              "test \"$rejected\" = 1; touch \"$out\"";
         }
       );
 

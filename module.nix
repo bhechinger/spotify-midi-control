@@ -9,6 +9,9 @@
 with lib;
 let
   cfg = config.services.spotify-midi-control;
+  midiCommandType = types.addCheck (types.nonEmptyListOf (types.ints.between 0 255)) (
+    command: length command <= 3
+  );
   midiCommand = command: concatMapStringsSep "," toString command;
   command = concatStringsSep " " (
     [
@@ -17,6 +20,7 @@ let
       "--client-name ${escapeShellArg cfg.clientName}"
     ]
     ++ optional cfg.learn "--learn"
+    ++ optional cfg.verbose "--verbose"
     ++ optionals (!cfg.learn) [
       "--play-command ${escapeShellArg (midiCommand cfg.midiCommands.play)}"
       "--pause-command ${escapeShellArg (midiCommand cfg.midiCommands.pause)}"
@@ -95,24 +99,31 @@ in
       default = false;
       description = "Print incoming MIDI command bytes instead of controlling Spotify.";
     };
+
+    verbose = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Print every received MIDI message while controlling Spotify.";
+    };
+
     midiCommands = {
       play = mkOption {
-        type = types.nonEmptyListOf (types.ints.between 0 255);
+        type = midiCommandType;
         description = "MIDI bytes that trigger Play.";
       };
 
       pause = mkOption {
-        type = types.nonEmptyListOf (types.ints.between 0 255);
+        type = midiCommandType;
         description = "MIDI bytes that trigger Pause.";
       };
 
       previous = mkOption {
-        type = types.nonEmptyListOf (types.ints.between 0 255);
+        type = midiCommandType;
         description = "MIDI bytes that trigger Previous.";
       };
 
       next = mkOption {
-        type = types.nonEmptyListOf (types.ints.between 0 255);
+        type = midiCommandType;
         description = "MIDI bytes that trigger Next.";
       };
     };

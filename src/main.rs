@@ -704,6 +704,16 @@ mod tests {
     }
 
     #[test]
+    fn version_flag_advertises_current_package_version() {
+        use clap::CommandFactory;
+
+        assert_eq!(
+            Args::command().render_version().to_string(),
+            "spotify-midi-control 1.0.0\n"
+        );
+    }
+
+    #[test]
     fn midi_command_formatters_emit_cli_and_nix_forms() {
         let one = midi::MidiCopy::from_bytes(&[176], 0);
         let three = midi::MidiCopy::from_bytes(&[176, 41, 127], 0);

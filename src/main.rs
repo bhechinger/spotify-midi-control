@@ -349,7 +349,7 @@ fn run_pipewire(
     use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
     use spa::pod::serialize::PodSerializer;
 
-    pw::init();
+    let _pipewire_runtime = PipeWireRuntime::new();
 
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
@@ -429,6 +429,28 @@ fn run_pipewire(
     }
 
     Ok(())
+}
+
+struct PipeWireRuntime;
+
+impl PipeWireRuntime {
+    fn new() -> Self {
+        // SAFETY: PipeWire accepts null argc/argv for normal library initialization.
+        unsafe {
+            pipewire::sys::pw_init(std::ptr::null_mut(), std::ptr::null_mut());
+        }
+        Self
+    }
+}
+
+impl Drop for PipeWireRuntime {
+    fn drop(&mut self) {
+        // SAFETY: `PipeWireRuntime` is created before all other PipeWire resources in
+        // `run_pipewire`, so Rust drops those resources before this guard.
+        unsafe {
+            pipewire::sys::pw_deinit();
+        }
+    }
 }
 
 fn pipewire_stream_flags() -> pipewire::stream::StreamFlags {

@@ -9,7 +9,7 @@
 }:
 rustPlatform.buildRustPackage {
   pname = "spotify-midi-control";
-  version = "0.1.0";
+  version = "1.0.0";
   cargoLock.lockFile = ./Cargo.lock;
   src = lib.cleanSource ./.;
 

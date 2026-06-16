@@ -708,8 +708,8 @@ mod tests {
         use clap::CommandFactory;
 
         assert_eq!(
-            Args::command().render_version().to_string(),
-            "spotify-midi-control 1.0.0\n"
+            Args::command().render_version(),
+            format!("spotify-midi-control {}\n", env!("CARGO_PKG_VERSION"))
         );
     }
 

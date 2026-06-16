@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::io::{self, IsTerminal};
 use std::mem;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -39,6 +41,9 @@ struct Args {
     #[arg(long, env = "SPOTIFY_MIDI_LEARN")]
     learn: bool,
 
+    #[arg(long, env = "SPOTIFY_MIDI_VERBOSE")]
+    verbose: bool,
+
     #[arg(long, env = "SPOTIFY_MIDI_PLAY_COMMAND", value_parser = parse_midi_command, required_unless_present = "learn")]
     play_command: Option<MidiCommand>,
 
@@ -58,6 +63,7 @@ struct Config {
     pipewire_remote: Option<String>,
     pipewire_target: Option<u32>,
     learning_mode: bool,
+    verbose: bool,
     midi_bindings: Option<MidiBindings>,
 }
 
@@ -89,6 +95,7 @@ impl Config {
             pipewire_remote: args.pipewire_remote,
             pipewire_target: args.pipewire_target,
             learning_mode: args.learn,
+            verbose: args.verbose,
             midi_bindings,
         })
     }
@@ -115,15 +122,15 @@ struct MidiBindings {
 }
 
 impl MidiBindings {
-    fn action_for(&self, midi: &midi::MidiCopy) -> Option<&str> {
+    fn action_for(&self, midi: &midi::MidiCopy) -> Option<spotify::Action> {
         if self.play.matches(midi) {
-            Some("Play")
+            Some(spotify::Action::Play)
         } else if self.pause.matches(midi) {
-            Some("Pause")
+            Some(spotify::Action::Pause)
         } else if self.previous.matches(midi) {
-            Some("Previous")
+            Some(spotify::Action::Previous)
         } else if self.next.matches(midi) {
-            Some("Next")
+            Some(spotify::Action::Next)
         } else {
             None
         }
@@ -170,35 +177,66 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (sender, receiver) = sync_channel(64);
     let (rt_producer, rt_consumer) = rt_midi_queue::channel(256);
-    let _midi_forwarder = spawn_midi_forwarder(rt_consumer, sender.clone());
+    let drop_counters = MidiDropCounters::default();
+    let _drop_reporter = spawn_drop_reporter(drop_counters.clone());
+    let _midi_forwarder = spawn_midi_forwarder(rt_consumer, sender.clone(), drop_counters.clone());
     let _controller = if config.learning_mode {
         spawn_learning_controller(receiver)
     } else {
-        let spotify_sender = sender.clone();
         spawn_controller(
             receiver,
-            spotify_sender,
             config
                 .midi_bindings
                 .expect("MIDI bindings are validated before startup"),
+            config.verbose,
         )
     };
 
     match config.backend {
-        Backend::Jack => run_jack(&config.client_name, rt_producer)?,
-        Backend::PipeWire => run_pipewire(&config, rt_producer)?,
+        Backend::Jack => run_jack(&config.client_name, rt_producer, drop_counters)?,
+        Backend::PipeWire => run_pipewire(&config, rt_producer, drop_counters)?,
     }
 
     Ok(())
 }
 
+#[derive(Clone, Default)]
+struct MidiDropCounters {
+    realtime_queue: Arc<AtomicU64>,
+    forwarder_channel: Arc<AtomicU64>,
+}
+
+fn drain_drop_counts(counters: &MidiDropCounters) -> (u64, u64) {
+    (
+        counters.realtime_queue.swap(0, Ordering::Relaxed),
+        counters.forwarder_channel.swap(0, Ordering::Relaxed),
+    )
+}
+
+fn spawn_drop_reporter(counters: MidiDropCounters) -> thread::JoinHandle<()> {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(30));
+        let (rt_drops, forwarder_drops) = drain_drop_counts(&counters);
+        if rt_drops != 0 || forwarder_drops != 0 {
+            eprintln!(
+                "dropped MIDI events: realtime_queue={rt_drops} forwarder_channel={forwarder_drops}"
+            );
+        }
+    })
+}
+
 fn spawn_midi_forwarder(
     mut consumer: rt_midi_queue::Consumer,
     sender: SyncSender<midi::MidiCopy>,
+    drop_counters: MidiDropCounters,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || loop {
         while let Some(midi) = consumer.try_pop() {
-            let _ = sender.try_send(midi);
+            if sender.try_send(midi).is_err() {
+                drop_counters
+                    .forwarder_channel
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
         thread::sleep(Duration::from_millis(1));
     })
@@ -237,11 +275,11 @@ fn midi_command_nix_list(midi: &midi::MidiCopy) -> String {
 
 fn spawn_controller(
     receiver: Receiver<midi::MidiCopy>,
-    spotify_sender: SyncSender<midi::MidiCopy>,
     midi_bindings: MidiBindings,
+    verbose: bool,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let mut spot = match spotify::Spotify::new(spotify_sender) {
+        let mut spot = match spotify::Spotify::new() {
             Ok(spot) => spot,
             Err(err) => {
                 eprintln!("failed to connect to session bus: {err}");
@@ -250,10 +288,12 @@ fn spawn_controller(
         };
 
         while let Ok(m) = receiver.recv() {
-            println!("midi data: {:?}", m);
+            if verbose {
+                println!("midi data: {:?}", m);
+            }
             if let Some(action) = midi_bindings.action_for(&m) {
-                if let Err(err) = spot.handle_midi(m, action) {
-                    eprintln!("failed to send Spotify action {action}: {err}");
+                if let Err(err) = spot.handle_action(action) {
+                    eprintln!("failed to send Spotify action {action:?}: {err}");
                 }
             }
         }
@@ -263,13 +303,16 @@ fn spawn_controller(
 fn run_jack(
     client_name: &str,
     mut producer: rt_midi_queue::Producer,
+    drop_counters: MidiDropCounters,
 ) -> Result<(), Box<dyn Error>> {
     let (client, _status) = jack::Client::new(client_name, jack::ClientOptions::NO_START_SERVER)?;
     let midi_in = client.register_port("MIDI In", jack::MidiIn)?;
 
     let callback = move |_: &jack::Client, ps: &jack::ProcessScope| -> jack::Control {
         for event in midi_in.iter(ps) {
-            let _ = producer.try_push(event.into());
+            if producer.try_push(event.into()).is_err() {
+                drop_counters.realtime_queue.fetch_add(1, Ordering::Relaxed);
+            }
         }
         jack::Control::Continue
     };
@@ -294,7 +337,11 @@ fn wait_for_quit() {
     }
 }
 
-fn run_pipewire(config: &Config, producer: rt_midi_queue::Producer) -> Result<(), Box<dyn Error>> {
+fn run_pipewire(
+    config: &Config,
+    producer: rt_midi_queue::Producer,
+    drop_counters: MidiDropCounters,
+) -> Result<(), Box<dyn Error>> {
     use libspa::pod::Pod;
     use pipewire as pw;
     use pw::properties::properties;
@@ -316,17 +363,19 @@ fn run_pipewire(config: &Config, producer: rt_midi_queue::Producer) -> Result<()
     let props = pipewire_stream_props(config.pipewire_target);
     let stream = pw::stream::StreamBox::new(&core, &config.client_name, props)?;
     let _listener = stream
-        .add_local_listener_with_user_data(producer)
+        .add_local_listener_with_user_data((producer, drop_counters))
         .state_changed(|_, _, old, new| {
             println!("PipeWire state changed: {:?} -> {:?}", old, new);
         })
-        .process(|stream, producer| {
+        .process(|stream, (producer, drop_counters)| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
 
             for_each_pipewire_midi_message(&mut buffer, |message| {
-                let _ = producer.try_push(message);
+                if producer.try_push(message).is_err() {
+                    drop_counters.realtime_queue.fetch_add(1, Ordering::Relaxed);
+                }
             });
         })
         .register()?;
@@ -428,57 +477,261 @@ fn for_each_pipewire_midi_message(
 }
 
 fn for_each_spa_midi_sequence(bytes: &[u8], handler: &mut impl FnMut(midi::MidiCopy)) {
-    let Some(pod) = libspa::pod::Pod::from_bytes(bytes) else {
+    let Some(pod_header) = read_unaligned::<libspa::sys::spa_pod>(bytes, 0) else {
         return;
     };
-    if pod.type_() != libspa::utils::SpaTypes::Sequence {
+    if pod_header.type_ != libspa::sys::SPA_TYPE_Sequence {
         return;
     }
 
-    let pod_size = pod.size() as usize;
+    let pod_header_size = mem::size_of::<libspa::sys::spa_pod>();
+    let pod_size = pod_header.size as usize;
+    let Some(pod_end) = pod_header_size.checked_add(pod_size) else {
+        return;
+    };
+    let Some(body) = bytes.get(pod_header_size..pod_end) else {
+        return;
+    };
+
     let sequence_body_size = mem::size_of::<libspa::sys::spa_pod_sequence_body>();
-    if pod_size < sequence_body_size {
+    if body.len() < sequence_body_size {
         return;
     }
 
     let mut offset = sequence_body_size;
-    while offset + mem::size_of::<libspa::sys::spa_pod_control>() <= pod_size {
-        let control = unsafe {
-            &*(pod.body().cast::<u8>().add(offset) as *const libspa::sys::spa_pod_control)
+    let control_header_size = mem::size_of::<libspa::sys::spa_pod_control>();
+    while offset
+        .checked_add(control_header_size)
+        .is_some_and(|control_end| control_end <= body.len())
+    {
+        let Some(control) = read_unaligned::<libspa::sys::spa_pod_control>(body, offset) else {
+            break;
         };
         let value_size = control.value.size as usize;
         let value_type = control.value.type_;
 
-        let control_size = mem::size_of::<libspa::sys::spa_pod_control>() + value_size;
-        if offset + control_size > pod_size {
+        let Some(value_start) = offset.checked_add(control_header_size) else {
             break;
-        }
+        };
+        let Some(value_end) = value_start.checked_add(value_size) else {
+            break;
+        };
+        let Some(value) = body.get(value_start..value_end) else {
+            break;
+        };
 
         if control.type_ == libspa::sys::SPA_CONTROL_Midi
             && value_type == libspa::sys::SPA_TYPE_Bytes
         {
-            let value = unsafe {
-                std::slice::from_raw_parts(
-                    (&control.value as *const libspa::sys::spa_pod)
-                        .add(1)
-                        .cast::<u8>(),
-                    value_size,
-                )
-            };
             handler(midi::MidiCopy::from_bytes(value, control.offset));
         }
 
-        offset += align_pod_size(control_size);
+        let Some(control_size) = control_header_size.checked_add(value_size) else {
+            break;
+        };
+        let Some(aligned_control_size) = align_pod_size(control_size) else {
+            break;
+        };
+        let Some(next_offset) = offset.checked_add(aligned_control_size) else {
+            break;
+        };
+        offset = next_offset;
     }
 }
 
-fn align_pod_size(size: usize) -> usize {
-    (size + 7) & !7
+fn read_unaligned<T: Copy>(bytes: &[u8], offset: usize) -> Option<T> {
+    let end = offset.checked_add(mem::size_of::<T>())?;
+    let src = bytes.get(offset..end)?;
+    Some(unsafe { std::ptr::read_unaligned(src.as_ptr().cast::<T>()) })
+}
+
+fn align_pod_size(size: usize) -> Option<usize> {
+    Some(size.checked_add(7)? & !7)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_midi_command_accepts_one_to_three_bytes() {
+        assert_eq!(parse_midi_command("176").unwrap().len, 1);
+        assert_eq!(parse_midi_command("176,41").unwrap().len, 2);
+        assert_eq!(
+            parse_midi_command("0xB0,0b101001,127").unwrap().bytes,
+            [176, 41, 127]
+        );
+    }
+
+    #[test]
+    fn parse_midi_command_rejects_empty_or_too_long_commands() {
+        assert!(parse_midi_command("").is_err());
+        assert!(parse_midi_command("176,41,127,1").is_err());
+    }
+
+    #[test]
+    fn midi_bindings_return_typed_spotify_actions() {
+        let bindings = MidiBindings {
+            play: parse_midi_command("176,41,127").unwrap(),
+            pause: parse_midi_command("176,42,127").unwrap(),
+            previous: parse_midi_command("176,58,127").unwrap(),
+            next: parse_midi_command("176,59,127").unwrap(),
+        };
+
+        assert_eq!(
+            bindings.action_for(&midi::MidiCopy::from_bytes(&[176, 41, 127], 0)),
+            Some(spotify::Action::Play)
+        );
+        assert_eq!(
+            bindings.action_for(&midi::MidiCopy::from_bytes(&[176, 42, 127], 0)),
+            Some(spotify::Action::Pause)
+        );
+        assert_eq!(
+            bindings.action_for(&midi::MidiCopy::from_bytes(&[176, 58, 127], 0)),
+            Some(spotify::Action::Previous)
+        );
+        assert_eq!(
+            bindings.action_for(&midi::MidiCopy::from_bytes(&[176, 59, 127], 0)),
+            Some(spotify::Action::Next)
+        );
+        assert_eq!(
+            bindings.action_for(&midi::MidiCopy::from_bytes(&[176, 99, 127], 0)),
+            None
+        );
+    }
+
+    #[test]
+    fn drain_drop_counts_reports_and_resets_counts() {
+        let counters = MidiDropCounters::default();
+        counters.realtime_queue.fetch_add(2, Ordering::Relaxed);
+        counters.forwarder_channel.fetch_add(3, Ordering::Relaxed);
+
+        assert_eq!(drain_drop_counts(&counters), (2, 3));
+        assert_eq!(drain_drop_counts(&counters), (0, 0));
+    }
+
+    #[test]
+    fn spa_midi_sequence_ignores_non_sequence_pod() {
+        let bytes = test_pod(libspa::sys::SPA_TYPE_Int, &[1, 0, 0, 0]);
+        let mut events = Vec::new();
+
+        for_each_spa_midi_sequence(&bytes, &mut |event| events.push(event));
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn spa_midi_sequence_ignores_truncated_sequence_body() {
+        let bytes = test_pod(libspa::sys::SPA_TYPE_Sequence, &[0, 0, 0, 0]);
+        let mut events = Vec::new();
+
+        for_each_spa_midi_sequence(&bytes, &mut |event| events.push(event));
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn spa_midi_sequence_ignores_truncated_control() {
+        let mut body = Vec::new();
+        append_plain(
+            &mut body,
+            &libspa::sys::spa_pod_sequence_body { unit: 0, pad: 0 },
+        );
+        body.extend_from_slice(&[1, 2, 3, 4]);
+        let bytes = test_pod(libspa::sys::SPA_TYPE_Sequence, &body);
+        let mut events = Vec::new();
+
+        for_each_spa_midi_sequence(&bytes, &mut |event| events.push(event));
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn spa_midi_sequence_ignores_oversized_control_value() {
+        let mut body = Vec::new();
+        append_plain(
+            &mut body,
+            &libspa::sys::spa_pod_sequence_body { unit: 0, pad: 0 },
+        );
+        append_plain(
+            &mut body,
+            &libspa::sys::spa_pod_control {
+                offset: 7,
+                type_: libspa::sys::SPA_CONTROL_Midi,
+                value: libspa::sys::spa_pod {
+                    size: 10,
+                    type_: libspa::sys::SPA_TYPE_Bytes,
+                },
+            },
+        );
+        body.push(176);
+        let bytes = test_pod(libspa::sys::SPA_TYPE_Sequence, &body);
+        let mut events = Vec::new();
+
+        for_each_spa_midi_sequence(&bytes, &mut |event| events.push(event));
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn spa_midi_sequence_emits_valid_midi_control() {
+        let bytes = test_midi_sequence(&[176, 41, 127], 11);
+        let mut events = Vec::new();
+
+        for_each_spa_midi_sequence(&bytes, &mut |event| events.push(event));
+
+        assert_eq!(
+            events,
+            vec![midi::MidiCopy::from_bytes(&[176, 41, 127], 11)]
+        );
+    }
+
+    fn test_midi_sequence(value: &[u8], offset: u32) -> Vec<u8> {
+        let mut body = Vec::new();
+        append_plain(
+            &mut body,
+            &libspa::sys::spa_pod_sequence_body { unit: 0, pad: 0 },
+        );
+        append_plain(
+            &mut body,
+            &libspa::sys::spa_pod_control {
+                offset,
+                type_: libspa::sys::SPA_CONTROL_Midi,
+                value: libspa::sys::spa_pod {
+                    size: value.len() as u32,
+                    type_: libspa::sys::SPA_TYPE_Bytes,
+                },
+            },
+        );
+        body.extend_from_slice(value);
+        let padding = align_pod_size(mem::size_of::<libspa::sys::spa_pod_control>() + value.len())
+            .unwrap()
+            - mem::size_of::<libspa::sys::spa_pod_control>()
+            - value.len();
+        body.resize(body.len() + padding, 0);
+
+        test_pod(libspa::sys::SPA_TYPE_Sequence, &body)
+    }
+
+    fn test_pod(type_: u32, body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        append_plain(
+            &mut bytes,
+            &libspa::sys::spa_pod {
+                size: body.len() as u32,
+                type_,
+            },
+        );
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    fn append_plain<T: Copy>(bytes: &mut Vec<u8>, value: &T) {
+        let value_bytes = unsafe {
+            std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>())
+        };
+        bytes.extend_from_slice(value_bytes);
+    }
 
     #[test]
     fn pipewire_stream_props_do_not_request_live_driver_scheduling() {

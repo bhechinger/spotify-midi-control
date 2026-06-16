@@ -37,7 +37,7 @@ spotify-midi-control \
   --next-command 176,59,127
 ```
 
-Decimal bytes, hex bytes, and binary bytes are accepted, so `0xB0,41,127` is equivalent to `176,41,127`.
+Decimal bytes, hex bytes, and binary bytes are accepted, so `0xB0,41,127` is equivalent to `176,41,127`. Commands must contain one to three bytes.
 
 ## Learning buttons
 
@@ -151,6 +151,12 @@ services.spotify-midi-control.learn = true;
 
 Then check the user service logs while pressing buttons. Turn learning mode back off after copying the values into `midiCommands`, otherwise the service will only print MIDI messages and will not control Spotify.
 
+To print every received MIDI message while controlling Spotify, enable verbose mode:
+
+```nix
+services.spotify-midi-control.verbose = true;
+```
+
 The same settings can be supplied through environment variables when running manually:
 
 - `SPOTIFY_MIDI_BACKEND`
@@ -158,7 +164,28 @@ The same settings can be supplied through environment variables when running man
 - `SPOTIFY_MIDI_PIPEWIRE_REMOTE`
 - `SPOTIFY_MIDI_PIPEWIRE_TARGET`
 - `SPOTIFY_MIDI_LEARN`
+- `SPOTIFY_MIDI_VERBOSE`
 - `SPOTIFY_MIDI_PLAY_COMMAND`
 - `SPOTIFY_MIDI_PAUSE_COMMAND`
 - `SPOTIFY_MIDI_PREVIOUS_COMMAND`
 - `SPOTIFY_MIDI_NEXT_COMMAND`
+
+## Development checks
+
+Use the flake checks for reproducible native headers and Rust tooling:
+
+```sh
+nix flake check
+```
+
+For a quick package build without linking a result symlink:
+
+```sh
+nix build --no-link
+```
+
+Inside the dev shell, stale `target/` artifacts from another Rust compiler can break Cargo. If that happens, use a fresh target directory:
+
+```sh
+CARGO_TARGET_DIR=/tmp/spotify-midi-control-target cargo test
+```
